@@ -1,0 +1,85 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.stats import ks_2samp
+import glob
+import os
+
+# Directories
+input_dir = "telescope_ordered_Alph"
+output_dir = "ecdf_ks_avg_results"
+os.makedirs(output_dir, exist_ok=True)
+
+# Load and align all ordered files
+ordered_files = sorted(glob.glob(os.path.join(input_dir, "*_filtered.tsv")))
+dataframes = {}
+
+print("Loading and aligning ordered files...")
+for file in ordered_files:
+    sample_name = os.path.splitext(os.path.basename(file))[0].replace("_filtered", "")
+    try:
+        df = pd.read_csv(file, sep='\t')
+        if 'transcript' not in df.columns or 'final_prop' not in df.columns:
+            print(f" Skipping {sample_name}: missing required columns.")
+            continue
+        df = df[['transcript', 'final_prop']].copy()
+        df.set_index('transcript', inplace=True)
+        dataframes[sample_name] = df
+    except Exception as e:
+        print(f"Error loading {sample_name}: {e}")
+
+# Ensure we have data
+if not dataframes:
+    raise RuntimeError(" No valid files loaded.")
+
+# Merge all into one DataFrame
+combined_df = pd.concat(dataframes.values(), axis=1, join='inner')
+combined_df.columns = dataframes.keys()
+combined_df = combined_df.sort_index()
+
+# Group by biological replicate
+grouped = {
+    'B1': [col for col in combined_df.columns if 'B1' in col],
+    'B2': [col for col in combined_df.columns if 'B2' in col],
+    'B3': [col for col in combined_df.columns if 'B3' in col]
+}
+
+for group in ['B1', 'B2', 'B3']:
+    if not grouped[group]:
+        raise RuntimeError(f" No technical replicates found for {group}")
+
+# Average technical replicates
+B1_avg = combined_df[grouped['B1']].mean(axis=1).sort_values().values
+B2_avg = combined_df[grouped['B2']].mean(axis=1).sort_values().values
+B3_avg = combined_df[grouped['B3']].mean(axis=1).sort_values().values
+
+# ECDF function
+def ecdf(data):
+    return np.arange(1, len(data) + 1) / len(data)
+
+# Plot ECDFs
+plt.figure(figsize=(8, 6))
+plt.plot(B1_avg, ecdf(B1_avg), label="B1", lw=2, color="blue")
+plt.plot(B2_avg, ecdf(B2_avg), label="B2", lw=2, color="green")
+plt.plot(B3_avg, ecdf(B3_avg), label="B3", lw=2, color="red")
+
+# Run KS tests
+ks_B1_B2 = ks_2samp(B1_avg, B2_avg)
+ks_B1_B3 = ks_2samp(B1_avg, B3_avg)
+ks_B2_B3 = ks_2samp(B2_avg, B3_avg)
+
+# Print results
+print(f"KS Test B1 vs B2: Statistic = {ks_B1_B2.statistic:.4f}, P-value = {ks_B1_B2.pvalue:.4g}")
+print(f"KS Test B1 vs B3: Statistic = {ks_B1_B3.statistic:.4f}, P-value = {ks_B1_B3.pvalue:.4g}")
+print(f"KS Test B2 vs B3: Statistic = {ks_B2_B3.statistic:.4f}, P-value = {ks_B2_B3.pvalue:.4g}")
+
+# Annotate and save plot
+plt.xlabel("final_prop (HERV Expression Proportion)")
+plt.ylabel("Cumulative Probability")
+plt.title("Empirical CDF - Kolmogorov-Smirnov Test")
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.savefig(os.path.join(output_dir, "ecdf_ks_avg_plot.png"))
+plt.show()
+
