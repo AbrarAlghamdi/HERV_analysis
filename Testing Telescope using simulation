@@ -1,0 +1,96 @@
+#!/bin/bash
+# %%% Choose the 3 HERVs loci %%%
+HERV_LOCI="HML2_1p36.21a,HML2_1p36.21b,HML2_1p36.21c"
+
+# Create New Output Dir
+out_dir="Results_repet"
+mkdir -p $out_dir
+
+# Get the Conda base environment path to activate conda environments later
+CONDA_BASE=$(conda info --base)
+
+# Source the conda.sh script using the base environment path to enable conda commands
+source $CONDA_BASE/etc/profile.d/conda.sh
+# Iterate over 1 to 100 to generate 100 datasets
+for i in {1..100}
+do
+  # %%% Define Output Files to store all R1 and R2 reads %%%
+  all_R1_reads="$out_dir/dataset_${i}_R1_reads.txt"
+  all_R2_reads="$out_dir/dataset_${i}_R2_reads.txt"
+
+  # Generate a random seed
+  #seed=$((RANDOM))
+  
+  # Activate the 'singleloc_sim' environment for running the simulation using R
+  conda activate singleloc_sim
+ 
+  Rscript simulate.R 3000 $HERV_LOCI > /dev/null 2>&1
+ 
+  echo "Simulation Run $i completed."
+
+	# Deactivate the 'singleloc_sim' environment after the simulation is complete
+	conda deactivate
+	
+	# Move R1 and R2 reads
+  mv sims/sample_01_1.fasta "$all_R1_reads"
+  mv sims/sample_01_2.fasta "$all_R2_reads"
+
+	# Activate the 'singleloc_align' environment for alignment using Bowtie2
+	conda activate singleloc_align
+
+	# Run Bowtie2 for aligning the simulated reads to the human reference genome (hg38)
+	# Options:
+	# -k 100: Report up to 100 alignments per read (multi-mapping)
+	# --very-sensitive-local: Use very sensitive alignment parameters for local alignment
+	# --score-min "L,0,1.6": Custom scoring function for allowing more alignments
+	# --rg-id sample_01: Add read group ID 'sample_01' for tracking
+	# -x refs/hg38: Use the hg38 reference genome index
+	# -f: Input format is FASTA
+	# -1 sims/sample_01_1.fasta -2 sims/sample_01_2.fasta: Paired-end FASTA files
+	# -S sims/multi.sam: Output SAM file with multiple alignments
+	# 2>&1 | tee sims/multi.log: Log the output and errors to 'sims/multi.log'
+	echo "Mapping with Bowtie2..."
+	bowtie2 \
+	 -k 100 --very-sensitive-local --score-min "L,0,1.6" \
+	 --rg-id sample_01 \
+	 -x refs/hg38 \
+	 -f -1 $all_R1_reads -2 $all_R2_reads \
+	 -S "$out_dir/multi_${i}.sam" \
+	 2>&1 | tee "$out_dir/multi.log"
+
+	# Deactivate the 'singleloc_align' environment after the alignment is complete
+	conda deactivate
+
+	# Activate the 'singleloc_tele' environment for retrotransposon assignment using Telescope
+	conda activate singleloc_tele
+
+	# Run Telescope for assigning multi-mapped reads to retrotransposons
+	# Options:
+	# --theta_prior 200000: Set prior on the assignment proportion
+	# --max_iter 200: Maximum number of iterations
+	# --updated_sam: Output an updated SAM file after assignment
+	# --outdir sims: Output directory for the results
+	# sims/multi.sam: Input SAM file with multi-mapping alignments
+	# refs/HERV_rmsk.hg38.v2.gtf: Annotation file for retrotransposon loci
+	# 2>&1 | tee sims/telescope.log: Log the output and errors to 'sims/telescope.log'
+	echo "Assigning Reads using Telescope..."
+	telescope assign \
+		--theta_prior 200000 \
+		--max_iter 200 \
+		--updated_sam \
+		--outdir $out_dir \
+		"$out_dir/multi_${i}.sam" \
+		refs/HERV_rmsk.hg38.v2.gtf \
+		2>&1 | tee "$out_dir/telescope.log"
+
+	# Convert the output BAM file from Telescope back to a SAM format
+	# samtools index "$out_dir/telescope-tmp_tele.bam"
+	samtools view -h -o "$out_dir/telescope-updated-${i}.sam" "$out_dir/telescope-updated.bam"
+	mv "$out_dir/telescope-telescope_report.tsv" "$out_dir/telescope_report_${i}.plot.tsv"
+
+	# Deactivate the 'singleloc_tele' environment after processing
+	conda deactivate
+	
+	echo "--------------- Iteration $i completed. ---------------"
+
+done
