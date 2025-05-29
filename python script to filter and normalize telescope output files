@@ -1,0 +1,90 @@
+import pandas as pd
+import glob
+import os
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# Directory paths
+input_dir = "/home/a1321/Desktop/Melen/Aug"
+output_dir = "telescope_filtered_Aug"
+
+plot_dir = os.path.join(output_dir, "plots")
+os.makedirs(output_dir, exist_ok=True)
+os.makedirs(plot_dir, exist_ok=True)
+
+# Filter threshold
+min_count_threshold = 10
+
+# Step 1: Load and filter TSV files safely (skip metadata line)
+telescope_files = glob.glob(os.path.join(input_dir, "*.tsv"))
+dataframes = {}
+
+print(" Loading and filtering Telescope result files (skipping metadata line)...")
+for file_path in telescope_files:
+    sample_name = os.path.splitext(os.path.basename(file_path))[0]
+    try:
+        df = pd.read_csv(file_path, sep='\t', skiprows=1)
+        df.columns = df.columns.str.strip()
+        if 'final_count' not in df.columns or 'transcript' not in df.columns:
+            print(f"Skipping {sample_name}: Required columns not found.")
+            continue
+        df = df[df['final_count'] >= min_count_threshold]
+        dataframes[sample_name] = df
+    except Exception as e:
+        print(f"Error loading {sample_name}: {e}")
+
+if not dataframes:
+    raise RuntimeError("No valid Telescope files were loaded. Check input folder and column headers.")
+
+# Step 2: Find common transcripts across all samples
+print(" Identifying common transcripts...")
+common_transcripts = set.intersection(*(set(df['transcript']) for df in dataframes.values()))
+
+# Step 3: Filter and recalculate proportions
+summary_stats = []
+print(" Filtering and recalculating proportions...")
+for sample_name, df in dataframes.items():
+    df_filtered = df[df['transcript'].isin(common_transcripts)].copy()
+    total_final_count = df_filtered['final_count'].sum()
+    df_filtered['final_prop'] = df_filtered['final_count'] / total_final_count
+
+    # Save cleaned file
+    df_filtered.to_csv(os.path.join(output_dir, f"{sample_name}_filtered.tsv"), sep='\t', index=False)
+
+    # Summary stats
+    summary_stats.append({
+        'sample': sample_name,
+        'num_transcripts': len(df_filtered),
+        'total_final_count': total_final_count,
+        'mean_prop': df_filtered['final_prop'].mean(),
+        'median_prop': df_filtered['final_prop'].median()
+    })
+
+    # Plot final count distribution
+    plt.figure(figsize=(8, 5))
+    sns.histplot(df_filtered['final_count'], bins=50, kde=True)
+    plt.title(f'Final Count Distribution: {sample_name}')
+    plt.xlabel('Final Count')
+    plt.ylabel('Frequency')
+    plt.tight_layout()
+    plt.savefig(os.path.join(plot_dir, f"{sample_name}_final_count_distribution.png"))
+    plt.close()
+
+    # Plot top 20 by final_prop
+    top_df = df_filtered.sort_values(by='final_prop', ascending=False).head(20)
+    plt.figure(figsize=(10, 6))
+    sns.barplot(x='final_prop', y='transcript', data=top_df)
+    plt.title(f'Top 20 Transcripts by Proportion: {sample_name}')
+    plt.xlabel('Final Proportion')
+    plt.ylabel('Transcript')
+    plt.tight_layout()
+    plt.savefig(os.path.join(plot_dir, f"{sample_name}_top20_final_prop.png"))
+    plt.close()
+
+# Save summary stats
+summary_df = pd.DataFrame(summary_stats)
+summary_df.to_csv(os.path.join(output_dir, "summary_statistics.tsv"), sep='\t', index=False)
+
+print(f" done Filtered results, plots, and stats are in '{output_dir}'")
+
+
