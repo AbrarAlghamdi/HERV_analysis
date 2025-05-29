@@ -1,0 +1,156 @@
+import aiohttp
+import aiofiles
+import asyncio
+import os
+import time
+import argparse
+import subprocess
+from aiohttp import TCPConnector
+from asyncio import Semaphore
+
+# Base HTTP URL for GEO data
+BASE_HTTP_URL = "https://ftp.ncbi.nlm.nih.gov/geo/series/{0}nnn/{1}/{2}/"
+
+# File type configurations for GSE
+FILE_TYPES = {
+    "matrix": {"suffix": "series_matrix.txt.gz", "folder": "matrix"},
+    "miniml": {"suffix": "family.xml.tgz", "folder": "miniml"},
+    "soft": {"suffix": "family.soft.gz", "folder": "soft"}
+}
+
+async def download_gse_file(session, semaphore, gse_id, output_dir, file_type):
+    """Asynchronously download a GSE file using aiohttp and aiofiles."""
+    gse_prefix = gse_id[:-3]
+    file_config = FILE_TYPES[file_type]
+    url = BASE_HTTP_URL.format(gse_prefix, gse_id, file_config["folder"]) + f"{gse_id}_{file_config['suffix']}"
+    local_filename = f"{gse_id}_{file_config['suffix']}"
+    local_file = os.path.join(output_dir, local_filename)
+
+    print(f"Starting download of {local_filename}...")
+
+    async with semaphore:
+        try:
+            async with session.get(url) as response:
+                if response.status == 200:
+                    async with aiofiles.open(local_file, 'wb') as f:
+                        await f.write(await response.read())
+                    print(f"Successfully downloaded {local_filename} to {local_file}")
+                    return local_file
+                else:
+                    print(f"Failed to download {local_filename} (HTTP status: {response.status})")
+                    return None
+        except Exception as e:
+            print(f"Error downloading {local_filename}: {str(e)}")
+            return None
+
+async def download_fastq_file(semaphore, srr_id, output_dir):
+    """Download a FASTQ file using fastq-dump."""
+    local_file = os.path.join(output_dir, f"{srr_id}.fastq")
+    print(f"Starting download for SRR ID: {srr_id}...")
+
+    async with semaphore:
+        try:
+            process = await asyncio.create_subprocess_exec(
+                'fastq-dump', '--split-files', '--gzip',
+                '--outdir', output_dir, srr_id,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await process.communicate()
+
+            if process.returncode == 0:
+                print(f"Download Successful for {srr_id} to {output_dir}/")
+                return local_file
+            else:
+                print(f"Download Failed for {srr_id}. Error: {stderr.decode()}")
+                return None
+        except Exception as e:
+            print(f"Error Occurred while downloading {srr_id}: {str(e)}")
+            return None
+
+async def download_all_files(file_ids, output_dir, max_concurrent=10, db_type='sra'):
+    """Download multiple GSE or FASTQ files concurrently."""
+    start_time = time.perf_counter()
+   
+    os.makedirs(output_dir, exist_ok=True)
+    semaphore = Semaphore(max_concurrent)
+   
+    print(f"Starting downloads for {len(file_ids)} {'GSE' if db_type == 'geo' else 'FASTQ'} files...")
+   
+    failed_ids = []
+    if db_type == 'geo':
+        connector = TCPConnector(limit=max_concurrent)
+        async with aiohttp.ClientSession(connector=connector) as session:
+            tasks = [
+                download_gse_file(session, semaphore, gse_id, output_dir, file_type)
+                for gse_id in file_ids
+                for file_type in FILE_TYPES
+            ]
+            results = await asyncio.gather(*tasks)
+            for i, result in enumerate(results):
+                if result is None:
+                    failed_ids.append(file_ids[i // len(FILE_TYPES)])
+    else:  # FASTQ
+        tasks = [download_fastq_file(semaphore, srr_id, output_dir) for srr_id in file_ids]
+        results = await asyncio.gather(*tasks)
+        failed_ids = [file_ids[i] for i, result in enumerate(results) if result is None]
+   
+    end_time = time.perf_counter()
+    total_time = end_time - start_time
+    minutes = total_time // 60
+    seconds = total_time - (minutes*60)
+    print(f"All downloads completed in {minutes:.2f} minute(s) and {seconds:.2f} second(s).")
+   
+    return failed_ids
+
+def main(file_ids, output_dir="downloaded_files", max_concurrent=10, db_type='sra'):
+    """Main function to download all files."""
+    failed_ids = asyncio.run(download_all_files(file_ids, output_dir, max_concurrent, db_type))
+    return failed_ids
+
+if __name__ == "__main__":
+    # Create an ArgumentParser object
+    parser = argparse.ArgumentParser(description='Retrieve data by ID from a database.')
+
+    # Define the arguments
+    parser.add_argument('-i', '--input_path', type=str, help='Path to the input file.')
+    parser.add_argument('-d', '--database_name', choices=['GEO', 'SRA', 'geo', 'sra'], help='Name of Database.')
+    parser.add_argument('-o', '--output_dir', type=str, default="Downloads", help='Directory to save the output.')
+
+    # Parse the arguments
+    args = parser.parse_args()
+
+    # extract gse ids from file
+    with open(args.input_path, "r") as ifile:
+        ncbi_ids = ifile.read().strip().splitlines()
+   
+    gse_ids, srr_ids = [], []
+    for Id in ncbi_ids:
+        if Id.startswith("GSE"):
+            gse_ids.append(Id)
+        elif Id.startswith("SRR"):
+            srr_ids.append(Id)
+        else:
+            print(f"Invalid ID: {Id}.")
+
+    failed_ids = []
+    if args.database_name.lower() == 'geo':
+        gse_print = ", ".join(gse_ids)
+        print(f"GSE ids are: {gse_print}")
+
+        # Download GSE files
+        failed_ids = main(gse_ids, output_dir=args.output_dir, db_type='geo')
+    elif args.database_name.lower() == 'sra':
+        fastq_print = ", ".join(srr_ids)
+        print(f"SRR ids are: {fastq_print}")
+
+        # Download FASTQ files
+        failed_ids = main(srr_ids, output_dir=args.output_dir, db_type='sra')
+
+    # Print failed IDs at the end
+    if failed_ids:
+        print("\nFailed to download the following IDs:")
+        for failed_id in failed_ids:
+            print(failed_id)
+    else:
+        print("\nAll IDs were successfully downloaded.")
