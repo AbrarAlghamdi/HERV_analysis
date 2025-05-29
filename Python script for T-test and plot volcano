@@ -1,0 +1,85 @@
+import pandas as pd
+import glob
+import os
+from scipy.stats import ttest_ind
+from statsmodels.stats.multitest import multipletests
+import matplotlib.pyplot as plt
+import numpy as np
+
+# Input directories
+group_aug_dir = "/home/a1321/Desktop/Melen/Aug/telescope_filtered_Aug"
+group_sep_dir = "/home/a1321/Desktop/Melen/Sep/telescope_filtered_Sep"
+output_dir = "./ttest_fdr_results"
+os.makedirs(output_dir, exist_ok=True)
+
+# Load and align files
+def load_group(group_dir):
+    files = sorted(glob.glob(os.path.join(group_dir, "*_filtered.tsv")))
+    dfs = []
+    for f in files:
+        df = pd.read_csv(f, sep='\t')[['transcript', 'final_prop']]
+        df.set_index('transcript', inplace=True)
+        dfs.append(df)
+    return pd.concat(dfs, axis=1, join='inner')
+
+print(" Loading datasets...")
+aug_df = load_group(group_aug_dir)
+sep_df = load_group(group_sep_dir)
+
+# Rename columns for clarity
+aug_df.columns = [f"aug_{i+1}" for i in range(aug_df.shape[1])]
+sep_df.columns = [f"sep_{i+1}" for i in range(sep_df.shape[1])]
+
+# Find common transcripts
+common_transcripts = aug_df.index.intersection(sep_df.index)
+aug_df = aug_df.loc[common_transcripts]
+sep_df = sep_df.loc[common_transcripts]
+
+# Perform t-tests per transcript
+p_values = []
+log2_fc = []
+transcripts = common_transcripts
+
+print(" Running t-tests and collecting p-values...")
+for transcript in transcripts:
+    aug_values = aug_df.loc[transcript].values
+    sep_values = sep_df.loc[transcript].values
+    _, p = ttest_ind(aug_values, sep_values, equal_var=False)
+    p_values.append(p)
+    mean_aug = np.mean(aug_values)
+    mean_sep = np.mean(sep_values)
+    log2fc = np.log2((mean_sep + 1e-8) / (mean_aug + 1e-8))  # Avoid div by zero
+    log2_fc.append(log2fc)
+
+# FDR correction
+rejected, p_adj, _, _ = multipletests(p_values, method='fdr_bh')
+
+# Prepare output
+results_df = pd.DataFrame({
+    'transcript': transcripts,
+    'mean_aug': aug_df.mean(axis=1),
+    'mean_sep': sep_df.mean(axis=1),
+    'log2_fold_change': log2_fc,
+    'p_value': p_values,
+    'fdr_adjusted_p': p_adj,
+    'significant': rejected
+})
+
+results_df = results_df.sort_values('fdr_adjusted_p')
+results_df.to_csv(os.path.join(output_dir, "differential_expression_ttest_fdr.tsv"), sep='\t', index=False)
+
+# Volcano plot
+plt.figure(figsize=(10, 6))
+sig = results_df['significant']
+plt.scatter(results_df['log2_fold_change'], -np.log10(results_df['p_value']),
+            c=sig.map({True: 'red', False: 'gray'}), alpha=0.7)
+plt.axhline(-np.log10(0.05), color='blue', linestyle='--', label='p=0.05')
+plt.xlabel("log2(Fold Change: Sep / Aug)")
+plt.ylabel("-log10(p-value)")
+plt.title("Volcano Plot: Differential Expression (Sep vs Aug)")
+plt.legend()
+plt.tight_layout()
+plt.savefig(os.path.join(output_dir, "volcano_plot.png"))
+plt.show()
+
+print(" T-tests, FDR correction, and volcano plot complete. Results in 'ttest_fdr_results/'")
