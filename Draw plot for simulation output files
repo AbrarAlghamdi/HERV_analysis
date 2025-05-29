@@ -1,0 +1,53 @@
+import glob
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+filenames = glob.glob("Results_Ric/*.plot.tsv")
+N = len(filenames)
+print(f"Total Number of files: {N}")
+
+HERV_LOCI = "HML2_1p36.21a,HML2_1p36.21b,HML2_1p36.21c"
+HERV_LOCI = HERV_LOCI.strip().split(",")
+print(f"HERV LOCI are: {HERV_LOCI}")
+# ["HML2_1p36.21a", "HML2_1p36.21b", "HML2_1p36.21c"]
+
+# Read the first file and initialize the merged DataFrame
+merged_df = pd.read_csv(filenames[0], sep="\t", comment="#")
+merged_df = merged_df[merged_df['transcript'].isin(HERV_LOCI)][["transcript", "final_count"]].rename(columns={"final_count": "count_1"})
+
+# Iterate over the remaining files and merge them
+for i in range(1, N):
+    df = pd.read_csv(filenames[i], sep="\t", comment="#")
+    df = df[df['transcript'].isin(HERV_LOCI)][["transcript", "final_count"]].rename(columns={"final_count": f"count_{i+1}"})
+    merged_df = merged_df.merge(df, on="transcript", how="inner")
+
+# Transpose the data and set the transcript as the index
+plot_data = merged_df.set_index('transcript').T
+
+# Create the stacked vertical bar plot
+fig, ax = plt.subplots(figsize=(24, 8))
+bars = plot_data.plot(kind='bar', stacked=True, ax=ax, legend=False)
+
+# Annotate bars with count values
+for bar in ax.patches:
+    height = bar.get_height()  # Get the height of the bar (count value)
+    if height > 0:  # Only display non-zero values
+        ax.text(
+            bar.get_x() + bar.get_width() / 2,  # Position text in the center of the bar
+            bar.get_y() + height / 2,  # Vertically center text
+            f'{int(height)}',  # The count value as an integer
+            ha='center', va='center', rotation=90, fontsize=8, color='white')
+
+# Customize the plot using ax methods
+ax.set_title('HERV Loci Counts Across Dataset No.', fontsize=16)
+ax.set_xlabel('Dataset No.', fontsize=12)
+ax.set_ylabel('Counts', fontsize=12)
+ax.legend(title='HERV LOCI', loc='upper right')
+ax.set_xticklabels(range(1, N+1), rotation=90)
+fig.tight_layout()
+
+# Save the plot as a PNG file
+fig.savefig("herv_loci_counts.png", format="png", dpi=300, bbox_inches='tight')
+# Show the plot
+plt.show()
