@@ -1,0 +1,25 @@
+import pandas as pd
+import os
+import glob
+
+input_dir = "telescope_filtered_Aug"
+output_dir = "./telescope_ordered_by_prop"
+os.makedirs(output_dir, exist_ok=True)
+
+# Process each filtered TSV file
+filtered_files = sorted(glob.glob(os.path.join(input_dir, "*_filtered.tsv")))
+print(" Ordering each file by 'final_prop' (descending)...")
+
+for file_path in filtered_files:
+    try:
+        df = pd.read_csv(file_path, sep='\t')
+        if 'final_prop' not in df.columns or 'transcript' not in df.columns:
+            print(f"Skipping {file_path}: required columns missing.")
+            continue
+        df_sorted = df.sort_values(by='final_prop', ascending=False).reset_index(drop=True)
+        output_file = os.path.join(output_dir, os.path.basename(file_path))
+        df_sorted.to_csv(output_file, sep='\t', index=False)
+        print(f"Saved proportion-ordered file: {output_file}")
+    except Exception as e:
+        print(f"Error processing {file_path}: {e}")
+
