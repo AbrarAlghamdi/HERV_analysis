@@ -1,0 +1,65 @@
+import pandas as pd
+import glob
+import os
+import seaborn as sns
+import matplotlib.pyplot as plt
+from scipy.stats import spearmanr
+
+# Directories
+input_dir = "./telescope_ordered_by_prop"
+output_dir = "./spearman_grouped_results"
+os.makedirs(output_dir, exist_ok=True)
+
+# Load files
+ordered_files = sorted(glob.glob(os.path.join(input_dir, "*_filtered.tsv")))
+dataframes = {}
+
+print(" Loading and aligning files for grouped Spearman correlation...")
+for file in ordered_files:
+    sample_name = os.path.splitext(os.path.basename(file))[0].replace("_filtered", "")
+    df = pd.read_csv(file, sep='\t')
+    if 'transcript' in df.columns and 'final_prop' in df.columns:
+        df = df[['transcript', 'final_prop']]
+        df.set_index('transcript', inplace=True)
+        dataframes[sample_name] = df
+    else:
+        print(f" Skipping {sample_name}: missing required columns.")
+
+# Merge all into one DataFrame
+combined_df = pd.concat(dataframes.values(), axis=1, join='inner')
+combined_df.columns = dataframes.keys()
+combined_df = combined_df.sort_index()
+
+# Group by biological replicate
+grouped = {
+    'B1': [col for col in combined_df.columns if 'B1' in col],
+    'B2': [col for col in combined_df.columns if 'B2' in col],
+    'B3': [col for col in combined_df.columns if 'B3' in col]
+}
+
+# Check all groups exist
+for g in grouped:
+    if not grouped[g]:
+        raise RuntimeError(f" No samples found for group {g}.")
+
+# Average technical replicates for each group
+grouped_df = pd.DataFrame({
+    group: combined_df[cols].mean(axis=1) for group, cols in grouped.items()
+})
+
+# Compute Spearman correlation between B1, B2, B3
+corr_matrix, _ = spearmanr(grouped_df, axis=0)
+corr_df = pd.DataFrame(corr_matrix, index=grouped_df.columns, columns=grouped_df.columns)
+
+# Save correlation matrix
+corr_df.to_csv(os.path.join(output_dir, "spearman_grouped_correlation.tsv"), sep='\t')
+
+# Plot heatmap
+plt.figure(figsize=(6, 5))
+sns.heatmap(corr_df, annot=True, cmap='coolwarm', fmt=".2f", square=True, linewidths=0.5)
+plt.title("Spearman Correlation Between B1, B2, B3 (Averaged)")
+plt.tight_layout()
+plt.savefig(os.path.join(output_dir, "spearman_grouped_heatmap.png"))
+plt.show()
+
+print("Group-level Spearman correlation complete. Results saved to 'spearman_grouped_results/'")
