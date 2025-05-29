@@ -1,0 +1,127 @@
+#!/bin/bash
+set -euo pipefail
+
+# Conda and environment setup
+CONDA_BASE=$(conda info --base)
+source "$CONDA_BASE/etc/profile.d/conda.sh"
+
+# Configuration
+FASTQ_DIR="/media/a1321/Extreme Pro/Melanocyte_RNAseq/ds521_S11O_S12-55261254"
+outdir="/media/a1321/Extreme Pro/Melanocyte_RNAseq/ds521_S11O_S12-55261254/Results"
+THREADS=8
+REFERENCE_GENOME="/home/a1321/Desktop/TelescopeTask/GTFs/hg38.fa"
+REFERENCE_FASTA="$REFERENCE_GENOME"
+GTF_FILE="/home/a1321/Desktop/TelescopeTask/telescope_demo/refs/HERV_rmsk.hg38.v2.gtf"
+
+# Create output directory
+mkdir -p "$outdir"
+
+# Validate required directories and files exist
+if [[ ! -d "$FASTQ_DIR" ]]; then
+    echo "Error: FASTQ directory does not exist: $FASTQ_DIR"
+    exit 1
+fi
+
+if [[ ! -f "$GTF_FILE" ]]; then
+    echo "Error: GTF file not found: $GTF_FILE"
+    exit 1
+fi
+
+# Bowtie2 index creation
+if [[ ! -f "$REFERENCE_GENOME.1.bt2" ]]; then
+    echo "Creating Bowtie2 index for $REFERENCE_GENOME"
+    conda activate singleloc_align
+    bowtie2-build "$REFERENCE_FASTA" "$REFERENCE_GENOME"
+    conda deactivate
+else
+    echo "Bowtie2 index already exists for $REFERENCE_GENOME"
+fi
+
+# Iterate over R1 Fastq Files
+for FASTQ_R1_PATH in "$FASTQ_DIR"/*_R1_*.fastq*; do
+    # Check if any R1 files were found
+    if [[ ! -f "$FASTQ_R1_PATH" ]]; then
+        echo "No FASTQ R1 files found in $FASTQ_DIR"
+        exit 1
+    fi
+
+    # Derive the R2 file path by replacing "_R1_" with "_R2_" in the R1 filename
+    FASTQ_R2_PATH="${FASTQ_R1_PATH/_R1_/_R2_}"
+   
+    # Extract the base name from the R1 file to use as a reference name
+    REF_BASE=$(basename "$FASTQ_R1_PATH" | sed 's/_R1_.*//')
+   
+    # Check if the corresponding R2 file exists
+    if [[ ! -f "$FASTQ_R2_PATH" ]]; then
+        echo "Error: Missing R2 file for $FASTQ_R1_PATH"
+        continue
+    fi
+   
+    echo "==================================================================="
+    echo "Processing sample: $REF_BASE"
+    echo "Input R1: $FASTQ_R1_PATH"
+    echo "Input R2: $FASTQ_R2_PATH"
+    echo "==================================================================="
+   
+    # Set expected output file paths
+    BOWTIE2_OUTPUT="$outdir/$REF_BASE.sam"
+    BOWTIE2_BAM="$outdir/$REF_BASE.bam"
+    SORTED_BAM="$outdir/$REF_BASE.sorted.bam"
+    TELESCOPE_OUTPUT="$outdir/$REF_BASE-telescope-updated.sam"
+   
+    # Bowtie2 alignment
+    if [[ ! -f "$BOWTIE2_OUTPUT" ]]; then
+        echo "Running Bowtie2 alignment..."
+        if ! conda activate singleloc_align; then
+            echo "Error: Failed to activate singleloc_align environment"
+            continue
+        fi
+       
+        bowtie2 \
+            -k 50 \
+            --very-sensitive-local \
+            --score-min "L,0,2" \
+            --rg-id "$REF_BASE" \
+            -x "$REFERENCE_GENOME" \
+            -1 "$FASTQ_R1_PATH" \
+            -2 "$FASTQ_R2_PATH" \
+            -S "$BOWTIE2_OUTPUT" \
+            -p "$THREADS" \
+            2>&1 | tee "$outdir/$REF_BASE.log"
+    else
+        echo "Bowtie2 output exists, skipping alignment: $BOWTIE2_OUTPUT"
+    fi
+    # Convert SAM to BAM and sort
+    samtools view -@ "$THREADS" -Sb "$BOWTIE2_OUTPUT" > "$BOWTIE2_BAM"
+    samtools collate -@ "$THREADS" "$BOWTIE2_BAM" -o "$SORTED_BAM"
+    #samtools sort -@ "$THREADS" "$BOWTIE2_BAM" -o "$SORTED_BAM"
+    #samtools index "$SORTED_BAM"
+    conda deactivate
+   
+    # Telescope assignment
+    if [[ ! -f "$TELESCOPE_OUTPUT" ]]; then
+        echo "Running Telescope assignment..."
+        if ! conda activate singleloc_tele; then
+            echo "Error: Failed to activate singleloc_tele environment"
+            continue
+        fi
+       
+        #ulimit -v 8388608
+        telescope assign \
+            --theta_prior 200000 \
+            --max_iter 200 \
+            --updated_sam \
+            --outdir "$outdir" \
+            --attribute gene_id \
+            --exp_tag telescope \
+            "$SORTED_BAM" \
+            "$GTF_FILE" \
+            2>&1 | tee "$outdir/$REF_BASE.telescope.log"
+       
+        samtools view -h -o "$TELESCOPE_OUTPUT" "$outdir/telescope-updated.bam"
+       
+        conda deactivate
+    else
+        echo "Telescope output exists, skipping assignment: $TELESCOPE_OUTPUT"
+    fi
+done
