@@ -1,0 +1,138 @@
+#!/usr/bin/env python3
+import pandas as pd
+import numpy as np
+from scipy.stats import ttest_ind
+from statsmodels.stats.multitest import multipletests
+import matplotlib.pyplot as plt
+import os
+
+# --------- Inputs ----------
+file_01 = "filtered_transcripts_present_in_all_samples_1.tsv"   # 1% FBS (stress)
+file_10 = "filtered_transcripts_present_in_all_samples_10.tsv"  # 10% FBS (control)
+
+output_dir = "./ttest_fdr_results"
+os.makedirs(output_dir, exist_ok=True)
+
+EPS = 1e-12  # for log2 stability
+FDR_CUTOFF = 0.05
+
+# --------- Load counts ----------
+df01 = pd.read_csv(file_01, sep="\t").set_index("transcript")
+df10 = pd.read_csv(file_10, sep="\t").set_index("transcript")
+
+# Convert to numeric, fill NAs with 0
+df01 = df01.apply(pd.to_numeric, errors="coerce").fillna(0.0)
+df10 = df10.apply(pd.to_numeric, errors="coerce").fillna(0.0)
+
+# --------- Align transcripts ----------
+common = df01.index.intersection(df10.index)
+if len(common) == 0:
+    raise RuntimeError("No common transcripts between the two files.")
+
+df01 = df01.loc[common]
+df10 = df10.loc[common]
+
+print(f"Common transcripts: {len(common)}")
+print(f"Samples in 01 (1%):  {df01.shape[1]}")
+print(f"Samples in 10 (10%): {df10.shape[1]}")
+
+# --------- Convert counts -> proportions per sample ----------
+# Each sample column sums to 1
+df01_prop = df01.div(df01.sum(axis=0), axis=1).fillna(0.0)
+df10_prop = df10.div(df10.sum(axis=0), axis=1).fillna(0.0)
+
+# --------- Welch t-test per transcript ----------
+rows = []
+for tx in common:
+    a = df01_prop.loc[tx].values.astype(float)
+    b = df10_prop.loc[tx].values.astype(float)
+
+    # Welch t-test
+    stat, p = ttest_ind(a, b, equal_var=False)
+
+    mean_01 = float(np.mean(a))
+    mean_10 = float(np.mean(b))
+    log2fc = float(np.log2((mean_01 + EPS) / (mean_10 + EPS)))
+
+    rows.append((tx, mean_01, mean_10, log2fc, p))
+
+res = pd.DataFrame(rows, columns=[
+    "transcript",
+    "mean_01",
+    "mean_10",
+    "log2_fold_change_01_over_10",
+    "p_value"
+])
+
+# Clean p-values
+res["p_value"] = res["p_value"].replace([np.nan, np.inf, -np.inf], 1.0)
+
+# --------- FDR correction ----------
+rej, padj, _, _ = multipletests(res["p_value"].values, method="fdr_bh")
+res["fdr_adjusted_p"] = padj
+res["significant_fdr05"] = np.where(res["fdr_adjusted_p"] < FDR_CUTOFF, "TRUE", "FALSE")
+
+# Sort by FDR
+res = res.sort_values("fdr_adjusted_p").reset_index(drop=True)
+
+# --------- Save outputs ----------
+out_all = os.path.join(output_dir, "differential_expression_ttest_fdr.tsv")
+res.to_csv(out_all, sep="\t", index=False, float_format="%.12g")
+
+sig = res[res["fdr_adjusted_p"] < FDR_CUTOFF].copy()
+out_sig = os.path.join(output_dir, "differential_expression_significant_fdr05.tsv")
+sig.to_csv(out_sig, sep="\t", index=False, float_format="%.12g")
+
+print("Saved:")
+print(" ", out_all)
+print(" ", out_sig)
+print(f"Significant (FDR<{FDR_CUTOFF}): {sig.shape[0]}")
+
+# --------- Top 10 up/down (within significant) ----------
+# Upregulated in 01 means log2FC > 0 (higher in 1% FBS)
+top10_up = sig.sort_values("log2_fold_change_01_over_10", ascending=False).head(10)
+top10_down = sig.sort_values("log2_fold_change_01_over_10", ascending=True).head(10)
+
+top10_up_path = os.path.join(output_dir, "top10_upregulated_FBS1_over_FBS10.tsv")
+top10_down_path = os.path.join(output_dir, "top10_downregulated_FBS1_over_FBS10.tsv")
+
+top10_up.to_csv(top10_up_path, sep="\t", index=False, float_format="%.12g")
+top10_down.to_csv(top10_down_path, sep="\t", index=False, float_format="%.12g")
+
+print("Saved top10 lists:")
+print(" ", top10_up_path)
+print(" ", top10_down_path)
+
+# Also print them to terminal (compact)
+print("\nTop 10 UP (higher in 1% FBS):")
+print(top10_up[["transcript","mean_01","mean_10","log2_fold_change_01_over_10","fdr_adjusted_p"]].to_string(index=False))
+
+print("\nTop 10 DOWN (lower in 1% FBS):")
+print(top10_down[["transcript","mean_01","mean_10","log2_fold_change_01_over_10","fdr_adjusted_p"]].to_string(index=False))
+
+# --------- Volcano plot ----------
+# Use -log10(p-value) for y axis
+pvals = res["p_value"].values
+y = -np.log10(np.clip(pvals, 1e-300, 1.0))
+x = res["log2_fold_change_01_over_10"].values
+is_sig = (res["fdr_adjusted_p"].values < FDR_CUTOFF)
+
+plt.figure(figsize=(10, 6))
+plt.scatter(x[~is_sig], y[~is_sig], alpha=0.6, s=12, edgecolors="none")   # non-sig
+plt.scatter(x[is_sig], y[is_sig], alpha=0.8, s=12, edgecolors="none")     # sig
+
+plt.axhline(-np.log10(0.05), linestyle="--", label="p = 0.05")
+plt.axvline(0.0, linestyle="--")
+plt.xlabel("log2(Fold Change: 1% FBS / 10% FBS)")
+plt.ylabel("-log10(p-value)")
+plt.title("Volcano plot (Welch t-test + BH-FDR)")
+
+plt.legend()
+plt.tight_layout()
+
+volcano_path = os.path.join(output_dir, "volcano_plot_ttest_FBS1_vs_FBS10.png")
+plt.savefig(volcano_path, dpi=150)
+print("\nSaved volcano plot:", volcano_path)
+
+plt.show()
+print("Done.")
