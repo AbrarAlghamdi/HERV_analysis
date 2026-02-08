@@ -79,7 +79,7 @@ process_folder () {
   echo "[Bowtie2] $SAMPLE_TAG"
   conda activate "$ALIGN_ENV"
   bowtie2 \
-    -k 50 \
+    -k 100 \
     --very-sensitive-local \
     --score-min "L,0,2" \
     --rg-id "$SAMPLE_TAG" \
